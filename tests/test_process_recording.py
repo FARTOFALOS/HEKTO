@@ -59,3 +59,15 @@ class TestRecogniseSpokenTime:
         time_str, conf = recognise_spoken_time("3:05 утра")
         assert time_str == "03:05"
         assert conf >= 0.9
+
+    def test_compound_russian_minutes(self) -> None:
+        """Compound: двадцать один = 21."""
+        time_str, conf = recognise_spoken_time("десять двадцать один")
+        assert time_str == "10:21"
+        assert conf >= 0.7
+
+    def test_compound_russian_hour_and_minute(self) -> None:
+        """Compound: двадцать один тридцать пять = 21:35."""
+        time_str, conf = recognise_spoken_time("двадцать один тридцать пять")
+        assert time_str == "21:35"
+        assert conf >= 0.7

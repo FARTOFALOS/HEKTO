@@ -72,27 +72,14 @@ def populated_db(tmp_path: Path) -> Path:
 
 class TestReporter:
     def test_report_is_generated(self, populated_db: Path, tmp_path: Path) -> None:
-        # Monkey-patch PATTERNS_DIR to tmp
-        import src.reporter as rep
-        original = rep.PATTERNS_DIR
-        rep.PATTERNS_DIR = tmp_path
-        try:
-            report_path = generate_daily_report(day="2025-01-15", db_path=populated_db)
-            assert report_path.exists()
-            content = report_path.read_text(encoding="utf-8")
-            assert "2025-01-15" in content
-            assert "рынок идёт вверх" in content
-            assert "SELF_CATCH" in content
-        finally:
-            rep.PATTERNS_DIR = original
+        report_path = generate_daily_report(day="2025-01-15", db_path=populated_db, output_dir=tmp_path)
+        assert report_path.exists()
+        content = report_path.read_text(encoding="utf-8")
+        assert "2025-01-15" in content
+        assert "рынок идёт вверх" in content
+        assert "SELF_CATCH" in content
 
     def test_report_empty_day(self, populated_db: Path, tmp_path: Path) -> None:
-        import src.reporter as rep
-        original = rep.PATTERNS_DIR
-        rep.PATTERNS_DIR = tmp_path
-        try:
-            report_path = generate_daily_report(day="2025-01-20", db_path=populated_db)
-            content = report_path.read_text(encoding="utf-8")
-            assert "Нет данных" in content
-        finally:
-            rep.PATTERNS_DIR = original
+        report_path = generate_daily_report(day="2025-01-20", db_path=populated_db, output_dir=tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+        assert "Нет данных" in content

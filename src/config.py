@@ -34,6 +34,12 @@ MIN_SILENCE_LEN_MS: int = 700      # ms of silence to split on
 MIN_CHUNK_LEN_MS: int = 1_000      # discard chunks shorter than this
 KEEP_SILENCE_MS: int = 300          # keep at chunk edges
 
+# ── Voice feature analysis ────────────────────────────────────────────────
+PAUSE_THRESHOLD_DB: float = -40.0   # frames below this are counted as pauses
+
+# ── Market correlation ────────────────────────────────────────────────────
+MAX_CANDLE_CORRELATION_MINUTES: int = 5  # max offset to match a chunk to a candle
+
 # ── Whisper ───────────────────────────────────────────────────────────────
 WHISPER_MODEL: str = os.getenv("HEKTO_WHISPER_MODEL", "base")
 WHISPER_LANGUAGE: str = os.getenv("HEKTO_WHISPER_LANG", "ru")

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config import DB_PATH, DEFAULT_SYMBOL, DEFAULT_TIMEFRAME
+from src.config import DB_PATH, DEFAULT_SYMBOL, DEFAULT_TIMEFRAME, MAX_CANDLE_CORRELATION_MINUTES
 from src.db_writer import get_connection, insert_market_context, transaction
 
 logger = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ def correlate_chunks_to_candles(
                 if delta < best_delta:
                     best_id, best_delta = cid, delta
 
-            if best_id is not None and best_delta <= timedelta(minutes=5):
+            if best_id is not None and best_delta <= timedelta(minutes=MAX_CANDLE_CORRELATION_MINUTES):
                 conn.execute(
                     "UPDATE speech_chunks SET trade_context_id = ? WHERE id = ?",
                     (best_id, chunk["id"]),

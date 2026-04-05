@@ -84,6 +84,7 @@ def _compute_stats(chunks: list[dict[str, Any]]) -> dict[str, Any]:
 def generate_daily_report(
     day: str | date | None = None,
     db_path: Path | str | None = None,
+    output_dir: Path | None = None,
 ) -> Path:
     """
     Generate a Markdown daily report for *day* (defaults to today).
@@ -156,7 +157,8 @@ def generate_daily_report(
     report_text = "\n".join(lines)
 
     # Save
-    report_path = PATTERNS_DIR / f"report_{day_str}.md"
+    dest = output_dir or PATTERNS_DIR
+    report_path = dest / f"report_{day_str}.md"
     report_path.write_text(report_text, encoding="utf-8")
     logger.info("Report saved → %s", report_path)
     return report_path

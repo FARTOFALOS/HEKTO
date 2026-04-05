@@ -56,6 +56,9 @@ _RU_NUMBERS: dict[str, int] = {
     "сорок": 40, "пятьдесят": 50,
 }
 
+# Compound numbers (e.g. "двадцать один") are handled via two-pass lookup
+# in recognise_spoken_time by combining tens + ones.
+
 # Regex: digital times like "10:14", "10 14", "10-14"
 _DIGIT_TIME_RE = re.compile(r"\b(\d{1,2})[:\s\-](\d{2})\b")
 
@@ -79,16 +82,31 @@ def recognise_spoken_time(text: str) -> tuple[str | None, float]:
         if 0 <= h <= 23 and 0 <= mi <= 59:
             return f"{h:02d}:{mi:02d}", 0.95
 
-    # 2) Try Russian word pairs  ("десять четырнадцать")
+    # 2) Try Russian word patterns
     words = text.lower().split()
-    for i in range(len(words) - 1):
-        h_val = _words_to_number(words[i])
-        m_val = _words_to_number(words[i + 1])
-        if h_val is not None and m_val is not None and 0 <= h_val <= 23 and 0 <= m_val <= 59:
+
+    def _try_number_at(idx: int) -> tuple[int | None, int]:
+        """Try to parse a number starting at words[idx]. Returns (value, words_consumed)."""
+        if idx >= len(words):
+            return None, 0
+        w1 = _words_to_number(words[idx])
+        if w1 is None:
+            return None, 0
+        # Check for compound: "двадцать один" = 20 + 1
+        if idx + 1 < len(words) and w1 in (20, 30, 40, 50):
+            w2 = _words_to_number(words[idx + 1])
+            if w2 is not None and 1 <= w2 <= 9:
+                return w1 + w2, 2
+        return w1, 1
+
+    for i in range(len(words)):
+        h_val, h_consumed = _try_number_at(i)
+        if h_val is None or not (0 <= h_val <= 23):
+            continue
+        m_val, m_consumed = _try_number_at(i + h_consumed)
+        if m_val is not None and 0 <= m_val <= 59:
             return f"{h_val:02d}:{m_val:02d}", 0.80
 
-    # 3) Compound like "двадцать один тридцать пять" → try 2-word hour + 2-word min
-    # Simplified: skip for MVP
     return None, 0.0
 
 # ── Dynamic silence threshold ─────────────────────────────────────────────
@@ -183,8 +201,9 @@ def extract_voice_features(audio_segment: "pydub.AudioSegment", sr: int = SAMPLE
     energy_mean = float(np.mean(rms_db))
     energy_std = float(np.std(rms_db))
 
-    # Pause ratio (frames below −40 dB relative)
-    pause_ratio = float(np.mean(rms_db < -40.0))
+    # Pause ratio (frames below threshold)
+    from src.config import PAUSE_THRESHOLD_DB
+    pause_ratio = float(np.mean(rms_db < PAUSE_THRESHOLD_DB))
 
     # Speech rate proxy via onset detection
     onsets = librosa.onset.onset_detect(y=samples, sr=sr, units="time")
