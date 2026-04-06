@@ -1,15 +1,9 @@
 """
-HEKTO daily reporter.
+HEKTO daily reporter — chain-centric.
 
-Reads the day's data from SQLite and produces a structured plain-text /
-Markdown report saved to ``data/patterns/``.
-
-Output format per the specification:
-
-    Наблюдение: …
-    Связь: …
-    Контекст: …
-    Сигнал опережения: …
+Reads the day's data from SQLite and produces a structured Markdown report
+saved to ``data/patterns/``.  The report now centres on trade chains as the
+primary unit, with baseline deviations and role breakdowns.
 """
 
 from __future__ import annotations
@@ -44,6 +38,27 @@ def _fetch_daily_state(conn, day: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM daily_state WHERE date = ?", (day,)).fetchone()
     return dict(row) if row else None
 
+
+def _fetch_day_chains(conn, day: str) -> list[dict[str, Any]]:
+    """Return all trade chains that were opened or active on *day*."""
+    rows = conn.execute(
+        """SELECT * FROM trade_chains
+           WHERE opened_at LIKE ? OR (status = 'incomplete' AND opened_at < ?)
+           ORDER BY opened_at""",
+        (f"{day}T%", f"{day}T00:00:00"),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _fetch_baseline(conn, day: str) -> dict[str, Any] | None:
+    """Return baseline for the day if it exists."""
+    row = conn.execute(
+        "SELECT * FROM voice_baseline WHERE date <= ? ORDER BY date DESC LIMIT 1",
+        (day,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 # ── Stats ─────────────────────────────────────────────────────────────────
 
 def _compute_stats(chunks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -66,6 +81,12 @@ def _compute_stats(chunks: list[dict[str, Any]]) -> dict[str, Any]:
         vals = [f[key] for f in features_list if key in f and f[key] is not None]
         return round(sum(vals) / len(vals), 2) if vals else 0.0
 
+    # Role breakdown
+    role_counts: dict[str, int] = {}
+    for c in chunks:
+        role = c.get("chunk_role", "other")
+        role_counts[role] = role_counts.get(role, 0) + 1
+
     return {
         "chunk_count": len(chunks),
         "avg_speech_rate": _mean("speech_rate_proxy"),
@@ -77,6 +98,7 @@ def _compute_stats(chunks: list[dict[str, Any]]) -> dict[str, Any]:
         "total_duration_sec": round(sum(
             (c["chunk_end_ms"] - c["chunk_start_ms"]) / 1000.0 for c in chunks
         ), 1),
+        "role_breakdown": role_counts,
     }
 
 # ── Report generation ─────────────────────────────────────────────────────
@@ -100,6 +122,8 @@ def generate_daily_report(
     try:
         chunks = _fetch_day_chunks(conn, day_str)
         daily_state = _fetch_daily_state(conn, day_str)
+        chains = _fetch_day_chains(conn, day_str)
+        baseline = _fetch_baseline(conn, day_str)
     finally:
         conn.close()
 
@@ -119,6 +143,19 @@ def generate_daily_report(
             lines.append(f"- Заметки: {daily_state['notes']}")
         lines.append("")
 
+    # Baseline status
+    lines.append("## Базовая линия (Baseline)\n")
+    if baseline:
+        lines.append(f"- Дата базовой линии: {baseline.get('date', '—')}")
+        lines.append(f"- Количество чанков: {baseline.get('chunk_count', 0)}")
+        if baseline.get("pitch_mean"):
+            lines.append(f"- Средний тон: {baseline['pitch_mean']:.1f} Гц")
+        if baseline.get("speech_rate_mean"):
+            lines.append(f"- Средний темп: {baseline['speech_rate_mean']:.2f}")
+    else:
+        lines.append("_Базовая линия ещё не сформирована (нужно ≥5 чанков)._")
+    lines.append("")
+
     # Stats
     lines.append("## Статистика\n")
     if stats:
@@ -130,11 +167,54 @@ def generate_daily_report(
         lines.append(f"- Средняя энергия: {stats.get('avg_energy_db', 0)} дБ")
         lines.append(f"- Доля пауз: {stats.get('avg_pause_ratio', 0)}")
         lines.append(f"- SELF_CATCH: {stats.get('self_catch_count', 0)}")
+
+        # Role breakdown
+        roles = stats.get("role_breakdown", {})
+        if roles:
+            lines.append("")
+            lines.append("### Типы высказываний")
+            for role, count in sorted(roles.items(), key=lambda x: -x[1]):
+                lines.append(f"- {role}: {count}")
     else:
         lines.append("_Нет данных за этот день._")
     lines.append("")
 
-    # Transcript excerpts
+    # Trade chains
+    lines.append("## Цепочки решений (Trade Chains)\n")
+    if chains:
+        for ch in chains:
+            status_icon = "✅" if ch.get("status") == "complete" else "⏳"
+            outcome = ch.get("outcome") or "—"
+            pnl = ch.get("pnl")
+            pnl_str = f"  P&L: {pnl}" if pnl is not None else ""
+            lines.append(
+                f"- {status_icon} Chain #{ch['id']}: {ch.get('symbol', '—')} "
+                f"{ch.get('direction', '—')}  → {outcome}{pnl_str}"
+            )
+
+            # Show chunks for this chain
+            chain_chunks = [c for c in chunks if c.get("chain_id") == ch["id"]]
+            for c in chain_chunks:
+                time_label = c.get("spoken_time") or c.get("system_time") or "—"
+                role = c.get("chunk_role", "other")
+                text = c.get("text") or ""
+                lines.append(f"  - **[{time_label}]** `{role}` {text}")
+        lines.append("")
+    else:
+        lines.append("_Нет цепочек за этот день._\n")
+
+    # Unlinked chunks
+    unlinked = [c for c in chunks if not c.get("chain_id")]
+    if unlinked:
+        lines.append("## Свободные фрагменты (unlinked)\n")
+        for c in unlinked:
+            time_label = c.get("spoken_time") or c.get("system_time") or "—"
+            role = c.get("chunk_role", "other")
+            text = c.get("text") or ""
+            lines.append(f"- **[{time_label}]** `{role}` {text}")
+        lines.append("")
+
+    # Transcript excerpts (full)
     if chunks:
         lines.append("## Расшифровка (фрагменты)\n")
         for c in chunks:
@@ -143,10 +223,10 @@ def generate_daily_report(
             lines.append(f"- **[{time_label}]** {text}")
         lines.append("")
 
-    # Observations placeholder (will become smarter with pattern engine)
+    # Observations placeholder
     lines.append("## Наблюдения\n")
     if stats and stats.get("chunk_count", 0) > 0:
-        lines.append("Наблюдение: данные собраны, анализ паттернов будет доступен по мере накопления истории.")
+        lines.append("Наблюдение: данные собраны, анализ паттернов будет доступен по мере накопления цепочек.")
         lines.append("Связь: —")
         lines.append("Контекст: —")
         lines.append("Сигнал опережения: —")

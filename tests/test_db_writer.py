@@ -19,6 +19,10 @@ from src.db_writer import (
     insert_pattern,
     insert_self_catch_link,
     insert_speech_chunk,
+    insert_trade_chain,
+    insert_trade_event,
+    insert_voice_baseline,
+    update_trade_chain,
     transaction,
 )
 
@@ -48,6 +52,9 @@ class TestSchema:
             "daily_state",
             "self_catch_links",
             "patterns",
+            "trade_chains",
+            "trade_events",
+            "voice_baseline",
         }
         assert expected.issubset(tables)
 
@@ -147,3 +154,102 @@ class TestTransaction:
         count = conn2.execute("SELECT COUNT(*) FROM audio_files WHERE filename='fail.wav'").fetchone()[0]
         conn2.close()
         assert count == 0
+
+
+class TestNewInserts:
+    """Tests for v2 insert functions (trade_chains, trade_events, voice_baseline)."""
+
+    def test_insert_trade_chain(self, db_path: Path) -> None:
+        with transaction(db_path) as conn:
+            cid = insert_trade_chain(
+                conn,
+                symbol="BTCUSDT",
+                direction="long",
+                status="incomplete",
+                opened_at="2025-01-15T10:00:00",
+            )
+        assert cid is not None and cid > 0
+
+    def test_update_trade_chain(self, db_path: Path) -> None:
+        with transaction(db_path) as conn:
+            cid = insert_trade_chain(conn, symbol="BTCUSDT", status="incomplete")
+            update_trade_chain(conn, cid, outcome="profit", pnl=100.0, status="complete")
+
+        conn2 = get_connection(db_path)
+        row = conn2.execute("SELECT * FROM trade_chains WHERE id = ?", (cid,)).fetchone()
+        conn2.close()
+        assert row["outcome"] == "profit"
+        assert row["pnl"] == 100.0
+        assert row["status"] == "complete"
+
+    def test_insert_trade_event(self, db_path: Path) -> None:
+        with transaction(db_path) as conn:
+            eid = insert_trade_event(
+                conn,
+                event_type="entry",
+                symbol="BTCUSDT",
+                direction="long",
+                price=42000.0,
+                quantity=1.0,
+                timestamp="2025-01-15T10:05:00",
+                source="csv",
+            )
+        assert eid is not None and eid > 0
+
+    def test_insert_voice_baseline(self, db_path: Path) -> None:
+        with transaction(db_path) as conn:
+            bid = insert_voice_baseline(
+                conn,
+                day="2025-01-15",
+                chunk_count=50,
+                pitch_mean=130.0,
+                pitch_std=15.0,
+                speech_rate_mean=3.5,
+                speech_rate_std=0.5,
+                energy_mean=-22.0,
+                energy_std=4.0,
+                pause_ratio_mean=0.08,
+                pause_ratio_std=0.03,
+            )
+        assert bid is not None and bid > 0
+
+    def test_insert_speech_chunk_with_new_fields(self, db_path: Path) -> None:
+        with transaction(db_path) as conn:
+            cid = insert_trade_chain(conn, symbol="BTCUSDT", status="incomplete")
+            aid = insert_audio_file(conn, filename="a.wav", recorded_at="2025-01-15T10:00:00")
+            sid = insert_speech_chunk(
+                conn,
+                audio_file_id=aid,
+                chunk_index=0,
+                chunk_start_ms=0,
+                chunk_end_ms=5000,
+                text="вижу сетап",
+                chunk_role="analysis",
+                chain_id=cid,
+                baseline_deviation={"pitch_deviation_pct": 25.0},
+                voice_features={"pitch_mean_hz": 150.0},
+            )
+        assert sid is not None and sid > 0
+
+        conn2 = get_connection(db_path)
+        row = conn2.execute("SELECT * FROM speech_chunks WHERE id = ?", (sid,)).fetchone()
+        conn2.close()
+        assert row["chunk_role"] == "analysis"
+        assert row["chain_id"] == cid
+        assert row["baseline_deviation"] is not None
+
+    def test_insert_pattern_with_new_fields(self, db_path: Path) -> None:
+        with transaction(db_path) as conn:
+            pid = insert_pattern(
+                conn,
+                title="Hold pattern before loss",
+                description="When trader says 'hold' 71% chance of loss",
+                conditions={"keywords": ["подержу"]},
+                evidence=[1, 2, 3],
+                counter_evidence=[4],
+                evidence_count=3,
+                counter_evidence_count=1,
+                confidence=0.71,
+                confidence_level="medium",
+            )
+        assert pid is not None and pid > 0
