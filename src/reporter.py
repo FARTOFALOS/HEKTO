@@ -45,7 +45,7 @@ def _fetch_day_chains(conn, day: str) -> list[dict[str, Any]]:
         """SELECT * FROM trade_chains
            WHERE opened_at LIKE ? OR (status = 'incomplete' AND opened_at < ?)
            ORDER BY opened_at""",
-        (f"{day}%", f"{day}T00:00:00"),
+        (f"{day}T%", f"{day}T00:00:00"),
     ).fetchall()
     return [dict(r) for r in rows]
 

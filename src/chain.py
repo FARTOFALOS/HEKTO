@@ -250,15 +250,18 @@ def link_events_to_chains(
                         (ev["direction"], chain_id),
                     )
 
-                # Link speech chunks within 3 min before entry
+                # Link speech chunks within 3 min before entry (same day only)
                 window_start = (ev_dt - timedelta(minutes=3)).strftime("%H:%M:%S")
                 window_end = ev_dt.strftime("%H:%M:%S")
                 conn.execute(
                     """UPDATE speech_chunks
                        SET chain_id = ?
                        WHERE chain_id IS NULL
-                         AND system_time BETWEEN ? AND ?""",
-                    (chain_id, window_start, window_end),
+                         AND system_time BETWEEN ? AND ?
+                         AND audio_file_id IN (
+                             SELECT id FROM audio_files WHERE recorded_at LIKE ?
+                         )""",
+                    (chain_id, window_start, window_end, f"{trading_date}%"),
                 )
                 linked += 1
 
@@ -313,13 +316,16 @@ def link_events_to_chains(
                         closed_at=ev["timestamp"],
                     )
 
-                    # Link speech chunks AFTER entry to this chain
+                    # Link speech chunks AFTER entry to this chain (same day only)
                     conn.execute(
                         """UPDATE speech_chunks
                            SET chain_id = ?
                            WHERE chain_id IS NULL
-                             AND system_time <= ?""",
-                        (chain_id, ev_dt.strftime("%H:%M:%S")),
+                             AND system_time <= ?
+                             AND audio_file_id IN (
+                                 SELECT id FROM audio_files WHERE recorded_at LIKE ?
+                             )""",
+                        (chain_id, ev_dt.strftime("%H:%M:%S"), f"{trading_date}%"),
                     )
                     linked += 1
 

@@ -18,7 +18,8 @@ from src.config import CHUNK_ROLE_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
-# Valid roles (order matters: first match wins when scores are tied)
+# Valid roles — priority order for tie-breaking (first match wins when scores are tied).
+# "exit" and "doubt" have highest priority because they are the most actionable signals.
 VALID_ROLES = ("exit", "doubt", "hold", "reflection", "expectation", "analysis", "other")
 
 # ── Chain-open trigger phrases ────────────────────────────────────────────
