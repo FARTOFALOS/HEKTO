@@ -40,6 +40,9 @@ from src.db_writer import (
     insert_speech_chunk,
     transaction,
 )
+from src.classify import classify_chunk_role, detect_chain_open, detect_chain_close
+from src.baseline import compute_deviation, get_latest_baseline
+from src.signal import generate_signal, format_signal
 
 logger = logging.getLogger(__name__)
 
@@ -242,21 +245,24 @@ def process_recording(
     audio_path: Path,
     recording_start: datetime | None = None,
     db_path: Path | str | None = None,
+    chain_id: int | None = None,
 ) -> int:
     """
-    Full pipeline: segment → transcribe → features → DB.
+    Full pipeline: segment → transcribe → features → classify → baseline → DB.
 
     Parameters
     ----------
     audio_path : path to raw WAV
     recording_start : wall-clock time when recording began (for system_time calc)
     db_path : override database path (for testing)
+    chain_id : optional chain_id to attach all chunks to
 
     Returns
     -------
     audio_file_id inserted into the database.
     """
     from pydub import AudioSegment as _AS  # ensure pydub is available
+    from src.chain import open_chain, get_active_chain
 
     db = db_path or DB_PATH
     init_db(db)
@@ -268,6 +274,12 @@ def process_recording(
             recording_start = datetime.strptime(stem, "recording_%Y%m%d_%H%M%S")
         except ValueError:
             recording_start = datetime.now()
+
+    # Get baseline for today (may be None if insufficient data)
+    baseline = get_latest_baseline(
+        target_date=recording_start.date(),
+        db_path=db,
+    )
 
     # 1 — Segment
     segments, silence_thresh, mean_db = segment_audio(audio_path)
@@ -288,6 +300,7 @@ def process_recording(
         )
 
     # 3 — Process each chunk
+    current_chain_id = chain_id
     for idx, (start_ms, end_ms, seg) in enumerate(segments):
         logger.info("Processing chunk %d/%d  (%d–%d ms)", idx + 1, len(segments), start_ms, end_ms)
 
@@ -298,6 +311,30 @@ def process_recording(
         # system_time = recording start + chunk midpoint offset
         midpoint_offset = timedelta(milliseconds=(start_ms + end_ms) / 2)
         system_time = (recording_start + midpoint_offset).strftime("%H:%M:%S")
+
+        # Classify chunk role
+        chunk_role = classify_chunk_role(text)
+
+        # Compute baseline deviation if baseline exists
+        deviation = None
+        if baseline:
+            deviation = compute_deviation(features, baseline)
+            sig = generate_signal(deviation)
+            if sig["alert"]:
+                logger.warning("SIGNAL: %s", format_signal(sig))
+
+        # Chain management: detect open/close triggers
+        if current_chain_id is None and detect_chain_open(text):
+            current_chain_id = open_chain(
+                opened_at=(recording_start + timedelta(milliseconds=start_ms)).isoformat(),
+                db_path=db,
+            )
+            logger.info("Chain opened by voice trigger: chain_id=%d", current_chain_id)
+        elif current_chain_id is None:
+            # Try to find an active chain
+            active = get_active_chain(db_path=db)
+            if active:
+                current_chain_id = active["id"]
 
         with transaction(db) as conn:
             insert_speech_chunk(
@@ -311,7 +348,17 @@ def process_recording(
                 system_time=system_time,
                 time_confidence=time_conf,
                 voice_features=features,
+                baseline_deviation=deviation,
+                chunk_role=chunk_role,
+                chain_id=current_chain_id,
             )
+
+        # Detect chain close
+        if current_chain_id is not None and detect_chain_close(text):
+            from src.chain import close_chain
+            close_chain(current_chain_id, db_path=db)
+            logger.info("Chain closed by voice trigger: chain_id=%d", current_chain_id)
+            current_chain_id = None
 
     logger.info("Finished processing %s  (%d chunks)", audio_path.name, len(segments))
     return audio_file_id

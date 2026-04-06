@@ -44,8 +44,12 @@ MAX_CANDLE_CORRELATION_MINUTES: int = 5  # max offset to match a chunk to a cand
 WHISPER_MODEL: str = os.getenv("HEKTO_WHISPER_MODEL", "base")
 WHISPER_LANGUAGE: str = os.getenv("HEKTO_WHISPER_LANG", "ru")
 
+# ── Baseline ──────────────────────────────────────────────────────────────
+# Rolling baseline: last N trading days (spec: 10)
+BASELINE_DAYS: int = 10
+
 # ── Voice features ────────────────────────────────────────────────────────
-# Baseline window: how many past chunks to use for personal baseline
+# Legacy window in chunks (kept for compatibility; prefer BASELINE_DAYS)
 BASELINE_WINDOW: int = 50
 
 # ── Spoken-time recognition ───────────────────────────────────────────────
@@ -55,6 +59,45 @@ BASELINE_WINDOW: int = 50
 # ── Market data ───────────────────────────────────────────────────────────
 DEFAULT_SYMBOL: str = os.getenv("HEKTO_SYMBOL", "BTCUSDT")
 DEFAULT_TIMEFRAME: str = "1m"
+
+# ── Trade chain boundaries ────────────────────────────────────────────────
+# Silence gap (minutes) after last chunk to auto-close a chain
+CHAIN_SILENCE_TIMEOUT_MIN: int = 15
+
+# ── Chunk role keywords ──────────────────────────────────────────────────
+# Each role maps to a list of Russian keyword stems / phrases.
+# Used for MVP keyword-based classification in classify_chunk_role().
+CHUNK_ROLE_KEYWORDS: dict[str, list[str]] = {
+    "analysis": [
+        "вижу", "смотрю", "сетап", "анализирую", "уровень", "сопротивление",
+        "поддержка", "жду реакции", "формируется", "свеча", "объём",
+        "структура", "зона", "консолидация", "пробой",
+    ],
+    "expectation": [
+        "думаю пойдёт", "скорее всего", "ожидаю", "думаю что",
+        "должен", "вероятно", "может пойти", "похоже на",
+        "выглядит как", "сценарий",
+    ],
+    "doubt": [
+        "не уверен", "не стоит", "сомневаюсь", "не знаю",
+        "рискованно", "страшно", "опасно", "непонятно",
+        "не нравится", "хочется выйти",
+    ],
+    "hold": [
+        "подержу", "ещё чуть-чуть", "потерплю", "не выхожу",
+        "держу", "остаюсь", "сижу", "пока не выхожу",
+        "подожду", "пересижу",
+    ],
+    "exit": [
+        "закрыл", "вышел", "стоп", "тейк", "зафиксировал",
+        "выхожу", "закрываю", "всё", "стоп-лосс сработал",
+    ],
+    "reflection": [
+        "надо было", "зря", "ошибся", "не стоило",
+        "в следующий раз", "урок", "вывод", "итого",
+        "по итогу", "результат",
+    ],
+}
 
 # ── Logging ───────────────────────────────────────────────────────────────
 import logging
