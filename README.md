@@ -24,13 +24,13 @@ HEKTO/
 │   ├── chain.py               # Управление цепочками решений (trade chains)
 │   ├── correlate.py           # Привязка речи к рыночным свечам
 │   ├── db_writer.py           # SQLite: схема и запись данных (9 таблиц)
-│   └── reporter.py            # Генерация дневных отчётов (chain-centric)
-├── tests/                     # Pytest-тесты (70 тестов)
+│   ├── reporter.py            # Генерация дневных отчётов (chain-centric)
+│   └── run_daily.py           # Один ежедневный запуск всего пайплайна
+├── tests/                     # Pytest-тесты
 ├── data/
 │   ├── raw/                   # Сырые аудиофайлы
 │   ├── processed/             # SQLite БД
 │   └── patterns/              # Markdown-отчёты и паттерны
-├── HEARTBEAT.md               # Расписание агента (daily/weekly/monthly)
 ├── requirements.txt
 └── README.md
 ```
@@ -60,16 +60,19 @@ pip install -r requirements.txt
 # 1. Запись (нажать Enter для остановки)
 python -m src.recorder
 
-# 2. Обработка записи (сегментация → Whisper → признаки → роли → baseline → DB)
+# 2. Полный дневной прогон одной командой
+python -m src.run_daily --date 2025-01-15 --candles candles.csv --trades trades.csv
+
+# 3. Обработка записи по шагам (если нужен ручной контроль)
 python -m src.process_recording data/raw/recording_YYYYMMDD_HHMMSS.wav
 
-# 3. Загрузка свечей из CSV
+# 4. Загрузка свечей из CSV
 python -m src.correlate ingest candles.csv --symbol BTCUSDT
 
-# 4. Привязка речи к свечам
+# 5. Привязка речи к свечам
 python -m src.correlate link 2025-01-15 --symbol BTCUSDT
 
-# 5. Генерация дневного отчёта
+# 6. Генерация дневного отчёта
 python -m src.reporter --date 2025-01-15
 ```
 
@@ -110,6 +113,10 @@ python -m pytest tests/ -v
 | 1 — Первые сигналы | 20–50 | Baseline сформирован, Immediate Signal работает |
 | 2 — Гипотезы | 50–100 | Первые паттерны с уровнем доверия Low |
 | 3 — Инсайты | 100+ | Устойчивые паттерны, предиктивные сигналы |
+
+## Известные ограничения
+
+- `link_events_to_chains()` для `exit` пока выбирает последнюю незавершённую цепочку по тому же `symbol`. При параллельных позициях в одном и том же инструменте возможна неверная привязка исхода.
 
 ## Переменные окружения
 

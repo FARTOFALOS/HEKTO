@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from src.db_writer import (
+    get_connection,
     init_db,
     insert_audio_file,
     insert_speech_chunk,
@@ -80,3 +81,113 @@ class TestCorrelation:
         # Now correlate
         linked = correlate_chunks_to_candles("2025-01-15", symbol="BTCUSDT", db_path=db_with_chunks)
         assert linked == 2
+
+    def test_prefers_system_time_over_spoken_time(self, candle_csv: Path, tmp_path: Path) -> None:
+        db = tmp_path / "system_time_priority.db"
+        init_db(db)
+        with transaction(db) as conn:
+            aid = insert_audio_file(conn, filename="a.wav", recorded_at="2025-01-15T10:00:00")
+            chunk_id = insert_speech_chunk(
+                conn,
+                audio_file_id=aid,
+                chunk_index=0,
+                chunk_start_ms=0,
+                chunk_end_ms=3000,
+                text="test",
+                spoken_time="10:03",
+                system_time="10:01:05",
+            )
+
+        ingest_candles(candle_csv, symbol="BTCUSDT", db_path=db)
+        linked = correlate_chunks_to_candles("2025-01-15", symbol="BTCUSDT", db_path=db)
+
+        conn = get_connection(db)
+        try:
+            row = conn.execute(
+                """SELECT mc.timestamp
+                   FROM speech_chunks sc
+                   JOIN market_context mc ON mc.id = sc.trade_context_id
+                   WHERE sc.id = ?""",
+                (chunk_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert linked == 1
+        assert row is not None
+        assert row["timestamp"] == "2025-01-15T10:01:00"
+
+    def test_falls_back_to_spoken_time_when_system_time_missing(self, candle_csv: Path, tmp_path: Path) -> None:
+        db = tmp_path / "spoken_time_fallback.db"
+        init_db(db)
+        with transaction(db) as conn:
+            aid = insert_audio_file(conn, filename="a.wav", recorded_at="2025-01-15T10:00:00")
+            chunk_id = insert_speech_chunk(
+                conn,
+                audio_file_id=aid,
+                chunk_index=0,
+                chunk_start_ms=0,
+                chunk_end_ms=3000,
+                text="test",
+                spoken_time="10:03",
+                system_time=None,
+            )
+
+        ingest_candles(candle_csv, symbol="BTCUSDT", db_path=db)
+        correlate_chunks_to_candles("2025-01-15", symbol="BTCUSDT", db_path=db)
+
+        conn = get_connection(db)
+        try:
+            row = conn.execute(
+                """SELECT mc.timestamp
+                   FROM speech_chunks sc
+                   JOIN market_context mc ON mc.id = sc.trade_context_id
+                   WHERE sc.id = ?""",
+                (chunk_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None
+        assert row["timestamp"] == "2025-01-15T10:03:00"
+
+    def test_only_links_chunks_from_requested_day(self, candle_csv: Path, tmp_path: Path) -> None:
+        db = tmp_path / "date_scoped.db"
+        init_db(db)
+        with transaction(db) as conn:
+            day_one_audio = insert_audio_file(conn, filename="a.wav", recorded_at="2025-01-15T10:00:00")
+            day_two_audio = insert_audio_file(conn, filename="b.wav", recorded_at="2025-01-16T10:00:00")
+            first_chunk = insert_speech_chunk(
+                conn,
+                audio_file_id=day_one_audio,
+                chunk_index=0,
+                chunk_start_ms=0,
+                chunk_end_ms=3000,
+                text="day one",
+                system_time="10:01:05",
+            )
+            second_chunk = insert_speech_chunk(
+                conn,
+                audio_file_id=day_two_audio,
+                chunk_index=0,
+                chunk_start_ms=0,
+                chunk_end_ms=3000,
+                text="day two",
+                system_time="10:01:05",
+            )
+
+        ingest_candles(candle_csv, symbol="BTCUSDT", db_path=db)
+        linked = correlate_chunks_to_candles("2025-01-15", symbol="BTCUSDT", db_path=db)
+
+        conn = get_connection(db)
+        try:
+            rows = conn.execute(
+                "SELECT id, trade_context_id FROM speech_chunks WHERE id IN (?, ?) ORDER BY id",
+                (first_chunk, second_chunk),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert linked == 1
+        assert rows[0]["trade_context_id"] is not None
+        assert rows[1]["trade_context_id"] is None

@@ -201,6 +201,10 @@ def link_events_to_chains(
     - entry events: find or create a chain, link speech chunks within 3 min BEFORE
     - exit events: find the chain with matching entry, close it
 
+    Known limitation:
+    Exit events still resolve to the latest incomplete chain for the same
+    symbol. If multiple same-symbol positions overlap, links can be wrong.
+
     Returns count of events linked.
     """
     db = db_path or DB_PATH
@@ -266,14 +270,23 @@ def link_events_to_chains(
                 linked += 1
 
             elif ev["event_type"] == "exit":
-                # Find matching chain
-                chain = conn.execute(
+                # Find matching chain.
+                matching_chains = conn.execute(
                     """SELECT id FROM trade_chains
                        WHERE status = 'incomplete'
-                         AND symbol = ?
-                       ORDER BY opened_at DESC LIMIT 1""",
+                          AND symbol = ?
+                        ORDER BY opened_at DESC""",
                     (ev["symbol"],),
-                ).fetchone()
+                ).fetchall()
+
+                if len(matching_chains) > 1:
+                    logger.warning(
+                        "Known limitation: exit event %s matched to latest incomplete chain for %s; concurrent same-symbol positions may link incorrectly",
+                        ev["id"],
+                        ev["symbol"],
+                    )
+
+                chain = matching_chains[0] if matching_chains else None
 
                 if chain:
                     chain_id = chain["id"]

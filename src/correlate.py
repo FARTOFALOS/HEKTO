@@ -66,6 +66,25 @@ def ingest_candles(csv_path: Path, symbol: str = DEFAULT_SYMBOL, db_path: Path |
 
 # ── Correlation ───────────────────────────────────────────────────────────
 
+def _parse_chunk_datetime(trading_date: str, *, system_time: str | None, spoken_time: str | None) -> datetime | None:
+    """
+    Resolve the chunk time for candle correlation.
+
+    Spec v2 prefers system_time. spoken_time is kept only as a fallback for
+    legacy or incomplete records.
+    """
+    time_str = system_time or spoken_time
+    if not time_str:
+        return None
+
+    try:
+        if len(time_str) <= 5:  # "HH:MM"
+            return datetime.fromisoformat(f"{trading_date}T{time_str}:00")
+        return datetime.fromisoformat(f"{trading_date}T{time_str}")
+    except ValueError:
+        return None
+
+
 def correlate_chunks_to_candles(
     trading_date: str,
     symbol: str = DEFAULT_SYMBOL,
@@ -106,24 +125,23 @@ def correlate_chunks_to_candles(
 
         # Fetch chunks for the date
         chunks = conn.execute(
-            """SELECT id, spoken_time, system_time FROM speech_chunks
-               WHERE (spoken_time IS NOT NULL OR system_time IS NOT NULL)
-                 AND trade_context_id IS NULL""",
+            """SELECT sc.id, sc.spoken_time, sc.system_time
+               FROM speech_chunks sc
+               JOIN audio_files af ON af.id = sc.audio_file_id
+               WHERE af.recorded_at LIKE ?
+                 AND (sc.spoken_time IS NOT NULL OR sc.system_time IS NOT NULL)
+                 AND sc.trade_context_id IS NULL""",
+            (f"{trading_date}%",),
         ).fetchall()
 
         linked = 0
         for chunk in chunks:
-            # Prefer spoken_time; fall back to system_time
-            time_str = chunk["spoken_time"] or chunk["system_time"]
-            if not time_str:
-                continue
-            try:
-                # Build a full datetime for comparison
-                if len(time_str) <= 5:  # "HH:MM"
-                    chunk_dt = datetime.fromisoformat(f"{trading_date}T{time_str}:00")
-                else:
-                    chunk_dt = datetime.fromisoformat(f"{trading_date}T{time_str}")
-            except ValueError:
+            chunk_dt = _parse_chunk_datetime(
+                trading_date,
+                system_time=chunk["system_time"],
+                spoken_time=chunk["spoken_time"],
+            )
+            if chunk_dt is None:
                 continue
 
             # Find closest candle
