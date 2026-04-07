@@ -85,6 +85,16 @@ class TestRunDaily:
             "generate_daily_report",
             lambda day, db_path=None, output_dir=None: calls.append(("generate_daily_report", day)) or report_path,
         )
+        monkeypatch.setattr(
+            run_daily_module,
+            "run_pattern_analysis",
+            lambda db_path=None: calls.append(("run_pattern_analysis", None)) or [],
+        )
+        monkeypatch.setattr(
+            run_daily_module,
+            "generate_pattern_report",
+            lambda patterns, output_dir=None: calls.append(("generate_pattern_report", None)) or None,
+        )
 
         summary = run_daily_module.run_daily(
             "2025-01-15",
@@ -103,6 +113,8 @@ class TestRunDaily:
             "event_links": 5,
             "stale_closed": 1,
             "baseline_saved": 7,
+            "patterns_found": 0,
+            "pattern_report": None,
             "report_path": report_path,
         }
         assert calls == [
@@ -114,5 +126,6 @@ class TestRunDaily:
             ("auto_close_stale_chains", db_path),
             ("compute_baseline", "2025-01-15"),
             ("save_baseline", "2025-01-15"),
+            ("run_pattern_analysis", None),
             ("generate_daily_report", "2025-01-15"),
         ]

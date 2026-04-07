@@ -189,6 +189,63 @@ def import_trades_csv(
     return count
 
 
+def _find_best_chain_for_exit(
+    conn,
+    ev: dict[str, Any],
+) -> int | None:
+    """
+    Find the best incomplete chain to match an exit event.
+
+    Strategy (handles parallel same-symbol positions correctly):
+    1. Find all incomplete chains for the same symbol.
+    2. Among those that have an entry event, pick the one whose entry price
+       is closest to the exit price (price-based matching).
+    3. If no entry prices are available, pick the chain opened earliest
+       (FIFO — first opened, first closed).
+    4. If no incomplete chains exist, return None.
+    """
+    matching_chains = conn.execute(
+        """SELECT tc.id, tc.opened_at
+           FROM trade_chains tc
+           WHERE tc.status = 'incomplete'
+             AND tc.symbol = ?
+           ORDER BY tc.opened_at ASC""",
+        (ev["symbol"],),
+    ).fetchall()
+
+    if not matching_chains:
+        return None
+
+    if len(matching_chains) == 1:
+        return matching_chains[0]["id"]
+
+    # Multiple concurrent chains — try price-based matching
+    exit_price = float(ev["price"]) if ev.get("price") else None
+
+    if exit_price is not None:
+        best_id: int | None = None
+        best_diff: float = float("inf")
+
+        for ch in matching_chains:
+            entry_ev = conn.execute(
+                """SELECT price FROM trade_events
+                   WHERE chain_id = ? AND event_type = 'entry'
+                   ORDER BY timestamp LIMIT 1""",
+                (ch["id"],),
+            ).fetchone()
+            if entry_ev and entry_ev["price"]:
+                diff = abs(float(entry_ev["price"]) - exit_price)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_id = ch["id"]
+
+        if best_id is not None:
+            return best_id
+
+    # Fallback: FIFO — oldest incomplete chain
+    return matching_chains[0]["id"]
+
+
 def link_events_to_chains(
     trading_date: str,
     *,
@@ -198,12 +255,10 @@ def link_events_to_chains(
     Match unlinked trade events to chains based on temporal proximity.
 
     For each unlinked event on trading_date:
-    - entry events: find or create a chain, link speech chunks within 3 min BEFORE
-    - exit events: find the chain with matching entry, close it
-
-    Known limitation:
-    Exit events still resolve to the latest incomplete chain for the same
-    symbol. If multiple same-symbol positions overlap, links can be wrong.
+    - entry events: always create a new chain (one entry = one chain),
+      link speech chunks within 3 min BEFORE entry.
+    - exit events: find the best matching chain using price-based matching
+      (supports parallel same-symbol positions), close it.
 
     Returns count of events linked.
     """
@@ -223,36 +278,21 @@ def link_events_to_chains(
             ev_dt = datetime.fromisoformat(ev["timestamp"])
 
             if ev["event_type"] == "entry":
-                # Find or create a chain
-                chain = conn.execute(
-                    """SELECT id FROM trade_chains
-                       WHERE status = 'incomplete'
-                         AND symbol = ?
-                         AND opened_at <= ?
-                       ORDER BY opened_at DESC LIMIT 1""",
-                    (ev["symbol"], ev["timestamp"]),
-                ).fetchone()
-
-                if chain:
-                    chain_id = chain["id"]
-                else:
-                    cur = conn.execute(
-                        """INSERT INTO trade_chains
-                           (symbol, direction, status, opened_at)
-                           VALUES (?, ?, 'incomplete', ?)""",
-                        (ev["symbol"], ev["direction"], ev["timestamp"]),
-                    )
-                    chain_id = cur.lastrowid
+                # Always create a new chain for each entry event.
+                # This ensures parallel positions in the same symbol
+                # get separate chains.
+                cur = conn.execute(
+                    """INSERT INTO trade_chains
+                       (symbol, direction, status, opened_at)
+                       VALUES (?, ?, 'incomplete', ?)""",
+                    (ev["symbol"], ev["direction"], ev["timestamp"]),
+                )
+                chain_id = cur.lastrowid
 
                 conn.execute(
                     "UPDATE trade_events SET chain_id = ? WHERE id = ?",
                     (chain_id, ev["id"]),
                 )
-                if ev.get("direction"):
-                    conn.execute(
-                        "UPDATE trade_chains SET direction = ? WHERE id = ?",
-                        (ev["direction"], chain_id),
-                    )
 
                 # Link speech chunks within 3 min before entry (same day only)
                 window_start = (ev_dt - timedelta(minutes=3)).strftime("%H:%M:%S")
@@ -270,77 +310,80 @@ def link_events_to_chains(
                 linked += 1
 
             elif ev["event_type"] == "exit":
-                # Find matching chain.
-                matching_chains = conn.execute(
-                    """SELECT id FROM trade_chains
-                       WHERE status = 'incomplete'
-                          AND symbol = ?
-                        ORDER BY opened_at DESC""",
-                    (ev["symbol"],),
-                ).fetchall()
+                chain_id = _find_best_chain_for_exit(conn, ev)
 
-                if len(matching_chains) > 1:
+                if chain_id is None:
                     logger.warning(
-                        "Known limitation: exit event %s matched to latest incomplete chain for %s; concurrent same-symbol positions may link incorrectly",
-                        ev["id"],
-                        ev["symbol"],
+                        "No incomplete chain found for exit event %s (%s)",
+                        ev["id"], ev["symbol"],
                     )
+                    continue
 
-                chain = matching_chains[0] if matching_chains else None
+                conn.execute(
+                    "UPDATE trade_events SET chain_id = ? WHERE id = ?",
+                    (chain_id, ev["id"]),
+                )
 
-                if chain:
-                    chain_id = chain["id"]
-                    conn.execute(
-                        "UPDATE trade_events SET chain_id = ? WHERE id = ?",
-                        (chain_id, ev["id"]),
-                    )
+                # Determine outcome from entry/exit prices
+                entry_ev = conn.execute(
+                    """SELECT price, direction FROM trade_events
+                       WHERE chain_id = ? AND event_type = 'entry'
+                       ORDER BY timestamp LIMIT 1""",
+                    (chain_id,),
+                ).fetchone()
 
-                    # Determine outcome from entry/exit prices
-                    entry_ev = conn.execute(
-                        """SELECT price, direction FROM trade_events
-                           WHERE chain_id = ? AND event_type = 'entry'
-                           ORDER BY timestamp LIMIT 1""",
-                        (chain_id,),
-                    ).fetchone()
+                outcome = None
+                pnl = None
+                if entry_ev and entry_ev["price"] and ev["price"]:
+                    entry_price = float(entry_ev["price"])
+                    exit_price = float(ev["price"])
+                    direction = entry_ev["direction"]
+                    if direction == "long":
+                        pnl = exit_price - entry_price
+                    elif direction == "short":
+                        pnl = entry_price - exit_price
+                    if pnl is not None:
+                        if pnl > 0:
+                            outcome = "profit"
+                        elif pnl < 0:
+                            outcome = "loss"
+                        else:
+                            outcome = "breakeven"
 
-                    outcome = None
-                    pnl = None
-                    if entry_ev and entry_ev["price"] and ev["price"]:
-                        entry_price = float(entry_ev["price"])
-                        exit_price = float(ev["price"])
-                        direction = entry_ev["direction"]
-                        if direction == "long":
-                            pnl = exit_price - entry_price
-                        elif direction == "short":
-                            pnl = entry_price - exit_price
-                        if pnl is not None:
-                            if pnl > 0:
-                                outcome = "profit"
-                            elif pnl < 0:
-                                outcome = "loss"
-                            else:
-                                outcome = "breakeven"
+                update_trade_chain(
+                    conn, chain_id,
+                    outcome=outcome,
+                    pnl=pnl,
+                    status="complete",
+                    closed_at=ev["timestamp"],
+                )
 
-                    update_trade_chain(
-                        conn, chain_id,
-                        outcome=outcome,
-                        pnl=pnl,
-                        status="complete",
-                        closed_at=ev["timestamp"],
-                    )
-
-                    # Link speech chunks AFTER entry to this chain (same day only)
+                # Link unlinked speech chunks between entry and exit
+                entry_time = conn.execute(
+                    """SELECT timestamp FROM trade_events
+                       WHERE chain_id = ? AND event_type = 'entry'
+                       ORDER BY timestamp LIMIT 1""",
+                    (chain_id,),
+                ).fetchone()
+                if entry_time:
+                    entry_dt = datetime.fromisoformat(entry_time["timestamp"])
                     conn.execute(
                         """UPDATE speech_chunks
                            SET chain_id = ?
                            WHERE chain_id IS NULL
+                             AND system_time >= ?
                              AND system_time <= ?
                              AND audio_file_id IN (
                                  SELECT id FROM audio_files WHERE recorded_at LIKE ?
                              )""",
-                        (chain_id, ev_dt.strftime("%H:%M:%S"), f"{trading_date}%"),
+                        (
+                            chain_id,
+                            entry_dt.strftime("%H:%M:%S"),
+                            ev_dt.strftime("%H:%M:%S"),
+                            f"{trading_date}%",
+                        ),
                     )
-                    linked += 1
+                linked += 1
 
         conn.commit()
         logger.info("Linked %d trade events to chains on %s", linked, trading_date)

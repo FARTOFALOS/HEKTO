@@ -16,6 +16,7 @@ from src.baseline import compute_baseline, save_baseline
 from src.chain import auto_close_stale_chains, import_trades_csv, link_events_to_chains
 from src.config import DB_PATH, DEFAULT_SYMBOL, PATTERNS_DIR, RAW_DIR
 from src.correlate import correlate_chunks_to_candles, ingest_candles
+from src.pattern_engine import generate_pattern_report, run_pattern_analysis
 from src.process_recording import process_recording
 from src.reporter import generate_daily_report
 
@@ -58,6 +59,11 @@ def run_daily(
 
     baseline = compute_baseline(target_date=day_str, db_path=db)
     baseline_saved = save_baseline(baseline, db_path=db) if baseline else None
+
+    # Pattern Engine: run after baseline, before report
+    patterns = run_pattern_analysis(db_path=db)
+    pattern_report = generate_pattern_report(patterns, output_dir=report_output_dir or PATTERNS_DIR) if patterns else None
+
     report_path = generate_daily_report(day=day_str, db_path=db, output_dir=report_output_dir or PATTERNS_DIR)
 
     summary = {
@@ -69,6 +75,8 @@ def run_daily(
         "event_links": event_links,
         "stale_closed": stale_closed,
         "baseline_saved": baseline_saved,
+        "patterns_found": len(patterns),
+        "pattern_report": str(pattern_report) if pattern_report else None,
         "report_path": report_path,
     }
     logger.info("Daily run summary: %s", summary)

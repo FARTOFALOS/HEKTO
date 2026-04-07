@@ -59,6 +59,16 @@ def _fetch_baseline(conn, day: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def _fetch_patterns(conn) -> list[dict[str, Any]]:
+    """Return active patterns sorted by confidence."""
+    rows = conn.execute(
+        """SELECT * FROM patterns
+           WHERE status IN ('candidate', 'confirmed')
+           ORDER BY confidence DESC""",
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── Stats ─────────────────────────────────────────────────────────────────
 
 def _compute_stats(chunks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -124,6 +134,7 @@ def generate_daily_report(
         daily_state = _fetch_daily_state(conn, day_str)
         chains = _fetch_day_chains(conn, day_str)
         baseline = _fetch_baseline(conn, day_str)
+        patterns = _fetch_patterns(conn)
     finally:
         conn.close()
 
@@ -233,6 +244,20 @@ def generate_daily_report(
     else:
         lines.append("_Нет данных для анализа._")
     lines.append("")
+
+    # Patterns section
+    if patterns:
+        lines.append("## Обнаруженные паттерны (Pattern Engine)\n")
+        for p in patterns:
+            conf_pct = round(p.get("confidence", 0) * 100, 1)
+            level = p.get("confidence_level", "low")
+            icon = "🔴" if level == "high" else ("⚠️" if level == "medium" else "ℹ️")
+            lines.append(
+                f"- {icon} **{p.get('title', '—')}** — "
+                f"уверенность {conf_pct}% "
+                f"({p.get('evidence_count', 0)} за / {p.get('counter_evidence_count', 0)} против)"
+            )
+        lines.append("")
 
     report_text = "\n".join(lines)
 
