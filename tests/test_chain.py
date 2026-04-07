@@ -135,3 +135,205 @@ class TestTradeImport:
         assert len(events) == 2
         assert events[0]["event_type"] == "entry"
         assert events[1]["event_type"] == "exit"
+
+
+class TestLinkEventsToChains:
+    """Tests for link_events_to_chains with parallel positions."""
+
+    def test_simple_entry_exit(self, db_path: Path) -> None:
+        """Single entry/exit pair creates one chain."""
+        with transaction(db_path) as conn:
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=42000.0, timestamp="2025-01-15T10:05:00",
+            )
+            insert_trade_event(
+                conn, event_type="exit", symbol="BTCUSDT",
+                direction="long", price=42500.0, timestamp="2025-01-15T10:30:00",
+            )
+
+        linked = link_events_to_chains("2025-01-15", db_path=db_path)
+        assert linked == 2
+
+        conn = get_connection(db_path)
+        chains = conn.execute("SELECT * FROM trade_chains ORDER BY opened_at").fetchall()
+        conn.close()
+        assert len(chains) == 1
+        assert chains[0]["status"] == "complete"
+        assert chains[0]["outcome"] == "profit"
+        assert chains[0]["pnl"] == 500.0
+
+    def test_parallel_same_symbol_price_matching(self, db_path: Path) -> None:
+        """Two overlapping positions in the same symbol: exits matched by price."""
+        with transaction(db_path) as conn:
+            # Position A: entry at 42000
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=42000.0, timestamp="2025-01-15T10:00:00",
+            )
+            # Position B: entry at 43000
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=43000.0, timestamp="2025-01-15T10:05:00",
+            )
+            # Exit B at 43200 (closest to 43000 entry)
+            insert_trade_event(
+                conn, event_type="exit", symbol="BTCUSDT",
+                direction="long", price=43200.0, timestamp="2025-01-15T10:20:00",
+            )
+            # Exit A at 42100 (closest to 42000 entry)
+            insert_trade_event(
+                conn, event_type="exit", symbol="BTCUSDT",
+                direction="long", price=42100.0, timestamp="2025-01-15T10:25:00",
+            )
+
+        linked = link_events_to_chains("2025-01-15", db_path=db_path)
+        assert linked == 4
+
+        conn = get_connection(db_path)
+        chains = conn.execute(
+            "SELECT * FROM trade_chains ORDER BY opened_at",
+        ).fetchall()
+        conn.close()
+
+        assert len(chains) == 2
+        # Chain A: entry 42000 → exit 42100 = +100
+        assert chains[0]["pnl"] == pytest.approx(100.0)
+        assert chains[0]["status"] == "complete"
+        # Chain B: entry 43000 → exit 43200 = +200
+        assert chains[1]["pnl"] == pytest.approx(200.0)
+        assert chains[1]["status"] == "complete"
+
+    def test_parallel_different_symbols(self, db_path: Path) -> None:
+        """Parallel positions in different symbols are always separate chains."""
+        with transaction(db_path) as conn:
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=42000.0, timestamp="2025-01-15T10:00:00",
+            )
+            insert_trade_event(
+                conn, event_type="entry", symbol="ETHUSDT",
+                direction="short", price=3000.0, timestamp="2025-01-15T10:02:00",
+            )
+            insert_trade_event(
+                conn, event_type="exit", symbol="ETHUSDT",
+                direction="short", price=2900.0, timestamp="2025-01-15T10:15:00",
+            )
+            insert_trade_event(
+                conn, event_type="exit", symbol="BTCUSDT",
+                direction="long", price=42500.0, timestamp="2025-01-15T10:20:00",
+            )
+
+        linked = link_events_to_chains("2025-01-15", db_path=db_path)
+        assert linked == 4
+
+        conn = get_connection(db_path)
+        chains = conn.execute("SELECT * FROM trade_chains ORDER BY opened_at").fetchall()
+        conn.close()
+
+        assert len(chains) == 2
+        btc_chain = [c for c in chains if c["symbol"] == "BTCUSDT"][0]
+        eth_chain = [c for c in chains if c["symbol"] == "ETHUSDT"][0]
+        assert btc_chain["pnl"] == pytest.approx(500.0)
+        assert eth_chain["pnl"] == pytest.approx(100.0)  # short: 3000 - 2900
+
+    def test_entry_creates_new_chain_always(self, db_path: Path) -> None:
+        """Each entry event creates a separate chain (no reuse)."""
+        with transaction(db_path) as conn:
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=42000.0, timestamp="2025-01-15T10:00:00",
+            )
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=43000.0, timestamp="2025-01-15T10:05:00",
+            )
+
+        linked = link_events_to_chains("2025-01-15", db_path=db_path)
+        assert linked == 2
+
+        conn = get_connection(db_path)
+        chains = conn.execute("SELECT * FROM trade_chains").fetchall()
+        conn.close()
+        assert len(chains) == 2
+
+    def test_exit_without_matching_chain(self, db_path: Path) -> None:
+        """Exit event with no matching chain is skipped (not linked)."""
+        with transaction(db_path) as conn:
+            insert_trade_event(
+                conn, event_type="exit", symbol="BTCUSDT",
+                direction="long", price=42500.0, timestamp="2025-01-15T10:30:00",
+            )
+
+        linked = link_events_to_chains("2025-01-15", db_path=db_path)
+        assert linked == 0
+
+    def test_speech_chunks_linked_to_correct_chain(self, db_path: Path) -> None:
+        """Speech chunks between entry and exit are linked to the correct chain."""
+        with transaction(db_path) as conn:
+            aid = insert_audio_file(
+                conn, filename="a.wav", recorded_at="2025-01-15T09:00:00",
+            )
+            # Chunk at 10:03 — before entry A
+            insert_speech_chunk(
+                conn, audio_file_id=aid, chunk_index=0,
+                chunk_start_ms=0, chunk_end_ms=3000,
+                text="вижу сетап", system_time="10:03:00",
+            )
+            # Chunk at 10:12 — between entries
+            insert_speech_chunk(
+                conn, audio_file_id=aid, chunk_index=1,
+                chunk_start_ms=3000, chunk_end_ms=6000,
+                text="думаю пойдёт", system_time="10:12:00",
+            )
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=42000.0, timestamp="2025-01-15T10:05:00",
+            )
+            insert_trade_event(
+                conn, event_type="exit", symbol="BTCUSDT",
+                direction="long", price=42500.0, timestamp="2025-01-15T10:30:00",
+            )
+
+        linked = link_events_to_chains("2025-01-15", db_path=db_path)
+        assert linked == 2
+
+        conn = get_connection(db_path)
+        chunks = conn.execute(
+            "SELECT id, chain_id, system_time FROM speech_chunks ORDER BY system_time",
+        ).fetchall()
+        conn.close()
+
+        # Chunk at 10:03 is within 3 min before entry (10:05) → linked
+        assert chunks[0]["chain_id"] is not None
+        # Chunk at 10:12 is between entry and exit → linked to same chain
+        assert chunks[1]["chain_id"] == chunks[0]["chain_id"]
+
+    def test_fifo_fallback_when_no_prices(self, db_path: Path) -> None:
+        """When exit has no price, fall back to FIFO (oldest chain first)."""
+        with transaction(db_path) as conn:
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=42000.0, timestamp="2025-01-15T10:00:00",
+            )
+            insert_trade_event(
+                conn, event_type="entry", symbol="BTCUSDT",
+                direction="long", price=43000.0, timestamp="2025-01-15T10:05:00",
+            )
+            # Exit without price
+            insert_trade_event(
+                conn, event_type="exit", symbol="BTCUSDT",
+                direction="long", timestamp="2025-01-15T10:20:00",
+            )
+
+        linked = link_events_to_chains("2025-01-15", db_path=db_path)
+        assert linked == 3
+
+        conn = get_connection(db_path)
+        chains = conn.execute("SELECT * FROM trade_chains ORDER BY opened_at").fetchall()
+        conn.close()
+
+        # First chain (FIFO) should be closed
+        assert chains[0]["status"] == "complete"
+        # Second chain should still be open
+        assert chains[1]["status"] == "incomplete"
