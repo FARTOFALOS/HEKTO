@@ -224,11 +224,17 @@ def extract_voice_features(audio_segment: "pydub.AudioSegment", sr: int = SAMPLE
 
 # ── Whisper transcription ─────────────────────────────────────────────────
 
-def transcribe_chunk(audio_segment: "pydub.AudioSegment") -> str:
-    """Transcribe an audio segment using Whisper. Returns text."""
+def load_whisper_model() -> Any:
+    """Load the configured Whisper model once per recording session."""
     import whisper
 
-    model = whisper.load_model(WHISPER_MODEL)
+    return whisper.load_model(WHISPER_MODEL)
+
+
+def transcribe_chunk(audio_segment: "pydub.AudioSegment", model: Any | None = None) -> str:
+    """Transcribe an audio segment using Whisper. Returns text."""
+    if model is None:
+        model = load_whisper_model()
 
     # Write segment to a temp WAV
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -300,11 +306,12 @@ def process_recording(
         )
 
     # 3 — Process each chunk
+    whisper_model = load_whisper_model() if segments else None
     current_chain_id = chain_id
     for idx, (start_ms, end_ms, seg) in enumerate(segments):
         logger.info("Processing chunk %d/%d  (%d–%d ms)", idx + 1, len(segments), start_ms, end_ms)
 
-        text = transcribe_chunk(seg)
+        text = transcribe_chunk(seg, model=whisper_model)
         features = extract_voice_features(seg)
         spoken_time, time_conf = recognise_spoken_time(text)
 

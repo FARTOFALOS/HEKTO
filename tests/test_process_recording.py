@@ -9,9 +9,15 @@ logic that is critical for correctness.
 
 from __future__ import annotations
 
+import sys
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
-from src.process_recording import recognise_spoken_time
+import src.process_recording as process_recording_module
+from src.process_recording import process_recording, recognise_spoken_time
 
 
 class TestRecogniseSpokenTime:
@@ -71,3 +77,65 @@ class TestRecogniseSpokenTime:
         time_str, conf = recognise_spoken_time("двадцать один тридцать пять")
         assert time_str == "21:35"
         assert conf >= 0.7
+
+
+class TestProcessRecording:
+    def test_process_recording_loads_whisper_once(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        class _FakeLoadedAudio:
+            def __len__(self) -> int:
+                return 6000
+
+        fake_pydub = SimpleNamespace(
+            AudioSegment=SimpleNamespace(from_file=staticmethod(lambda _: _FakeLoadedAudio()))
+        )
+        monkeypatch.setitem(sys.modules, "pydub", fake_pydub)
+
+        model = object()
+        load_calls = {"count": 0}
+        transcribe_models: list[object] = []
+
+        monkeypatch.setattr(
+            process_recording_module,
+            "segment_audio",
+            lambda _: (
+                [(0, 1000, object()), (2000, 3000, object())],
+                -45.0,
+                -31.0,
+            ),
+        )
+        monkeypatch.setattr(
+            process_recording_module,
+            "load_whisper_model",
+            lambda: load_calls.__setitem__("count", load_calls["count"] + 1) or model,
+        )
+        monkeypatch.setattr(
+            process_recording_module,
+            "transcribe_chunk",
+            lambda _segment, model=None: transcribe_models.append(model) or "тест",
+        )
+        monkeypatch.setattr(
+            process_recording_module,
+            "extract_voice_features",
+            lambda _segment: {
+                "pitch_mean_hz": 120.0,
+                "speech_rate_proxy": 3.0,
+                "energy_mean_db": -20.0,
+                "pause_ratio": 0.1,
+            },
+        )
+        monkeypatch.setattr(process_recording_module, "recognise_spoken_time", lambda _text: (None, 0.0))
+        monkeypatch.setattr(process_recording_module, "classify_chunk_role", lambda _text: "other")
+        monkeypatch.setattr(process_recording_module, "get_latest_baseline", lambda **_kwargs: None)
+        monkeypatch.setattr(process_recording_module, "detect_chain_open", lambda _text: False)
+        monkeypatch.setattr(process_recording_module, "detect_chain_close", lambda _text: False)
+
+        audio_path = tmp_path / "recording_20250115_100000.wav"
+        audio_file_id = process_recording(
+            audio_path,
+            recording_start=datetime(2025, 1, 15, 10, 0, 0),
+            db_path=tmp_path / "test.db",
+        )
+
+        assert audio_file_id > 0
+        assert load_calls["count"] == 1
+        assert transcribe_models == [model, model]
