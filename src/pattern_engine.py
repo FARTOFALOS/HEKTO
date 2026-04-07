@@ -46,6 +46,12 @@ CONFIDENCE_THRESHOLDS: dict[str, float] = {
     "medium": 0.50,
 }
 
+CONFIDENCE_LEVEL_LABELS: list[tuple[str, str]] = [
+    ("high", "🔴 Высокая уверенность"),
+    ("medium", "⚠️ Средняя уверенность"),
+    ("low", "ℹ️ Низкая уверенность"),
+]
+
 # ── Data loading ──────────────────────────────────────────────────────────
 
 
@@ -668,7 +674,7 @@ def generate_pattern_report(
     lines.append(f"Всего паттернов: **{len(patterns)}**\n")
 
     # Group by confidence level
-    for level, label in [("high", "🔴 Высокая уверенность"), ("medium", "⚠️ Средняя уверенность"), ("low", "ℹ️ Низкая уверенность")]:
+    for level, label in CONFIDENCE_LEVEL_LABELS:
         level_patterns = [p for p in patterns if p.get("confidence_level") == level]
         if not level_patterns:
             continue
