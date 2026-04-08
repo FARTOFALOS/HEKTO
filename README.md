@@ -10,11 +10,33 @@
 
 ---
 
+> ### 🔰 Новичок? Никогда не работал с кодом?
+> **[Открой INSTALL.md](INSTALL.md)** — там пошаговая инструкция с картинками:
+> скачать → открыть терминал → запустить одну команду. Всё.
+
+---
+
 ## 🚀 Установка одной командой
 
-Скрипт автоматически установит всё необходимое: Python-зависимости,
-FFmpeg, виртуальное окружение, проверит микрофон и создаст скрипты
-быстрого запуска.
+### Вариант 1 — Скачать и установить (одна команда)
+
+**macOS / Linux** — открой Терминал и вставь:
+```bash
+curl -sL https://github.com/FARTOFALOS/HEKTO/archive/refs/heads/main.zip -o /tmp/hekto.zip \
+  && unzip -o /tmp/hekto.zip -d ~/HEKTO_install \
+  && cd ~/HEKTO_install/HEKTO-main \
+  && bash setup_hekto.sh
+```
+
+**Windows (PowerShell)** — нажми Win+X → "PowerShell" и вставь:
+```powershell
+Invoke-WebRequest -Uri "https://github.com/FARTOFALOS/HEKTO/archive/refs/heads/main.zip" -OutFile "$env:TEMP\hekto.zip"
+Expand-Archive -Path "$env:TEMP\hekto.zip" -DestinationPath "$HOME\HEKTO_install" -Force
+Set-Location "$HOME\HEKTO_install\HEKTO-main"
+.\setup_hekto.bat
+```
+
+### Вариант 2 — Если уже скачал/клонировал
 
 **macOS / Linux:**
 ```bash
@@ -35,7 +57,9 @@ python setup_hekto.py
 python setup_hekto.py --check
 ```
 
-После установки появятся скрипты быстрого запуска:
+### После установки
+
+Появятся скрипты быстрого запуска:
 
 | Скрипт | Что делает |
 |--------|-----------|
