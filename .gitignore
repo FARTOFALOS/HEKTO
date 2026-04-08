@@ -25,5 +25,15 @@ data/patterns/*.md
 .DS_Store
 Thumbs.db
 
+# Generated launcher scripts (created by setup_hekto.py)
+hekto_record.sh
+hekto_daily.sh
+hekto_state.sh
+hekto_report.sh
+hekto_record.bat
+hekto_daily.bat
+hekto_state.bat
+hekto_report.bat
+
 # Pytest
 .pytest_cache/
